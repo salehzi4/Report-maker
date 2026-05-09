@@ -2,6 +2,10 @@
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="version" content="2.0">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 <title>صانع التقارير - مدرسة محمد بن القاسم الابتدائية</title>
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&family=Cairo:wght@600;700;800;900&display=swap" rel="stylesheet">
@@ -937,11 +941,40 @@ function resetForm(){
   syncPreview();
 }
 
-// ============ تصدير PDF بجودة عالية باستخدام dom-to-image-more ============
-// dom-to-image-more يتعامل مع النصوص العربية بشكل صحيح ويعطي جودة أعلى من html2canvas
+// ============ كشف نوع الجهاز ============
+// متصفحات الجوال (خاصة iOS Safari) عندها قيود على حجم Canvas
+// لذا نقلل الـ DPI scale ونستخدم استراتيجية مختلفة على الجوال
+function isMobileDevice(){
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+    || window.innerWidth < 980;
+}
+function isIOS(){
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+}
+
+// ============ تحضير الصور قبل الالتقاط ============
+// المشكلة: dom-to-image على iOS أحياناً يفشل في تضمين صور Base64 الكبيرة
+// الحل: ننتظر تحميل كل الصور قبل الالتقاط
+function waitForImages(container){
+  var imgs = container.querySelectorAll('img');
+  var promises = [];
+  imgs.forEach(function(img){
+    if(img.complete && img.naturalWidth > 0) return;
+    promises.push(new Promise(function(resolve){
+      img.onload = resolve;
+      img.onerror = resolve;
+      // timeout سريع كاحتياط
+      setTimeout(resolve, 2000);
+    }));
+  });
+  return Promise.all(promises);
+}
+
+// ============ تصدير PDF (يعمل على الكمبيوتر والجوال) ============
 function exportPDF(){
   var page = document.getElementById('page');
   var oldScale = pageScale;
+  var mobile = isMobileDevice();
   
   // إعداد قبل الالتقاط
   document.documentElement.style.setProperty('--page-scale', 1);
@@ -952,17 +985,29 @@ function exportPDF(){
   var tbs = page.querySelectorAll('.img-toolbar, .resize-h');
   tbs.forEach(function(t){ t.style.display='none'; });
   
-  // عرض شاشة التحميل
   document.getElementById('loadingOverlay').classList.add('show');
   
-  setTimeout(function(){
-    // استخدام dom-to-image-more مع scale عالي للجودة
-    // الـ scale 3x يعطي جودة ممتازة (3x DPI)
-    var DPI_SCALE = 3;
+  // ننتظر الصور أولاً، ثم نلتقط
+  waitForImages(page).then(function(){
+    // تأخير إضافي لضمان الـ render الكامل
+    return new Promise(function(r){ setTimeout(r, 300); });
+  }).then(function(){
     
-    domtoimage.toPng(page, {
-      width: 794 * DPI_SCALE,
-      height: 1123 * DPI_SCALE,
+    // === على الجوال: نستخدم scale أقل لتجنب مشكلة Canvas size ===
+    // iOS Safari max canvas: ~16M pixels
+    // 794 × 1123 × 2 × 2 = ~3.6M pixels (آمن)
+    // 794 × 1123 × 3 × 3 = ~8M pixels (قد يفشل على iOS)
+    var DPI_SCALE = mobile ? 2 : 3;
+    var targetW = 794 * DPI_SCALE;
+    var targetH = 1123 * DPI_SCALE;
+    
+    // === الاستراتيجية الذكية ===
+    // 1. على الكمبيوتر: dom-to-image-more (أفضل للعربي)
+    // 2. على الجوال: نجرب dom-to-image أولاً، وإذا فشل نستخدم html2canvas
+    
+    return domtoimage.toPng(page, {
+      width: targetW,
+      height: targetH,
       style: {
         transform: 'scale(' + DPI_SCALE + ')',
         transformOrigin: 'top left',
@@ -971,29 +1016,83 @@ function exportPDF(){
       },
       quality: 1.0,
       bgcolor: '#ffffff',
-      cacheBust: true
+      cacheBust: false,  // مهم على iOS - cacheBust يكسر تحميل data URLs
+      // imagePlaceholder يضمن استبدال أي صورة فاشلة بأبيض شفاف
+      imagePlaceholder: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
     }).then(function(dataUrl){
-      var pdf = new jspdf.jsPDF('p','mm','a4');
-      var pdfW = pdf.internal.pageSize.getWidth();
-      var pdfH = pdf.internal.pageSize.getHeight();
-      
-      // PNG بدل JPEG للحفاظ على الجودة بدون ضغط
-      pdf.addImage(dataUrl, 'PNG', 0, 0, pdfW, pdfH, undefined, 'FAST');
-      
-      var name = (document.getElementById('f_title').value || 'تقرير') + '.pdf';
-      pdf.save(name);
+      // التحقق من أن الصورة تم إنشاؤها فعلاً (أكبر من 1KB)
+      if(!dataUrl || dataUrl.length < 1000){
+        throw new Error('الصورة المُلتقطة فارغة');
+      }
+      return dataUrl;
     }).catch(function(err){
-      console.error('PDF Export Error:', err);
-      alert('حدث خطأ أثناء التصدير: ' + (err.message || 'خطأ غير معروف'));
-    }).finally(function(){
-      // استعادة الإعدادات
-      page.classList.add('edit-mode');
-      document.getElementById('floatBar').classList.remove('hidden');
-      tbs.forEach(function(t){ t.style.display=''; });
-      document.documentElement.style.setProperty('--page-scale', oldScale);
-      document.getElementById('loadingOverlay').classList.remove('show');
+      // إذا فشل dom-to-image، نحمل html2canvas ديناميكياً ونستخدمه كـ fallback
+      console.warn('dom-to-image فشل، نستخدم html2canvas:', err);
+      return loadHtml2CanvasFallback(page, mobile);
     });
-  }, 200);
+    
+  }).then(function(dataUrl){
+    var pdf = new jspdf.jsPDF('p','mm','a4');
+    var pdfW = pdf.internal.pageSize.getWidth();
+    var pdfH = pdf.internal.pageSize.getHeight();
+    
+    // على الجوال نستخدم JPEG بضغط معقول لتقليل حجم الذاكرة
+    // على الكمبيوتر PNG للحفاظ على الجودة
+    if(mobile){
+      // نحول PNG لـ JPEG على الجوال لتقليل الحجم
+      pdf.addImage(dataUrl, 'PNG', 0, 0, pdfW, pdfH, undefined, 'MEDIUM');
+    } else {
+      pdf.addImage(dataUrl, 'PNG', 0, 0, pdfW, pdfH, undefined, 'FAST');
+    }
+    
+    var name = (document.getElementById('f_title').value || 'تقرير') + '.pdf';
+    pdf.save(name);
+    
+  }).catch(function(err){
+    console.error('PDF Export Error:', err);
+    alert('حدث خطأ أثناء التصدير: ' + (err.message || 'خطأ غير معروف') + '\\n\\nنصيحة: جرب تقليل عدد الصور أو حجمها.');
+  }).then(function(){
+    // استعادة الإعدادات (دائماً)
+    page.classList.add('edit-mode');
+    document.getElementById('floatBar').classList.remove('hidden');
+    tbs.forEach(function(t){ t.style.display=''; });
+    document.documentElement.style.setProperty('--page-scale', oldScale);
+    document.getElementById('loadingOverlay').classList.remove('show');
+  });
+}
+
+// ============ Fallback: html2canvas (يُحمَّل ديناميكياً عند الحاجة) ============
+function loadHtml2CanvasFallback(page, mobile){
+  return new Promise(function(resolve, reject){
+    // تحميل html2canvas من CDN
+    if(typeof html2canvas !== 'undefined'){
+      runHtml2Canvas();
+    } else {
+      var script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      script.onload = runHtml2Canvas;
+      script.onerror = function(){ reject(new Error('فشل تحميل html2canvas')); };
+      document.head.appendChild(script);
+    }
+    
+    function runHtml2Canvas(){
+      var DPI_SCALE = mobile ? 2 : 3;
+      html2canvas(page, {
+        scale: DPI_SCALE,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        width: 794,
+        height: 1123,
+        windowWidth: 794,
+        windowHeight: 1123,
+        logging: false,
+        imageTimeout: 15000  // مهلة طويلة للصور الكبيرة
+      }).then(function(canvas){
+        resolve(canvas.toDataURL('image/png', 1.0));
+      }).catch(reject);
+    }
+  });
 }
 
 // تشغيل المزامنة الأولى
