@@ -365,13 +365,71 @@
   @keyframes spin{to{transform:rotate(360deg)}}
 
   @media print{
-    @page{size:A4;margin:0}
-    body{background:#fff}
+    /* إعدادات الصفحة - صارمة لمنع التقسيم */
+    @page{
+      size:A4 portrait;
+      margin:0;
+      padding:0;
+    }
+    
+    /* إخفاء كل شيء غير الصفحة */
     .toolbar,.form-panel,.float-bar,.upload-zone,.img-toolbar,.resize-h,.zoom-controls,.template-picker,.loading-overlay{display:none !important}
-    .container{display:block;padding:0;max-width:none}
-    .preview-wrap{gap:0}
-    .page-scaler{transform:none !important;margin:0 !important}
-    .a4-page{box-shadow:none;width:210mm;height:297mm;outline:none !important}
+    
+    /* reset للجسم - مهم للجوال */
+    html, body{
+      margin:0 !important;
+      padding:0 !important;
+      width:210mm !important;
+      height:297mm !important;
+      background:#fff !important;
+      overflow:hidden !important;
+      -webkit-print-color-adjust:exact !important;
+      print-color-adjust:exact !important;
+    }
+    
+    .container{
+      display:block !important;
+      padding:0 !important;
+      margin:0 !important;
+      max-width:none !important;
+      width:210mm !important;
+    }
+    .preview-wrap{
+      gap:0 !important;
+      margin:0 !important;
+      padding:0 !important;
+      width:210mm !important;
+      height:297mm !important;
+    }
+    .page-scaler{
+      transform:none !important;
+      margin:0 !important;
+      padding:0 !important;
+      width:210mm !important;
+    }
+    
+    /* الصفحة A4 بأبعاد دقيقة - بـ mm وليس px */
+    .a4-page{
+      box-shadow:none !important;
+      width:210mm !important;
+      height:296.8mm !important;  /* 297 - 0.2mm كهامش أمان لمنع overflow */
+      outline:none !important;
+      margin:0 !important;
+      padding:0 !important;
+      page-break-after:avoid !important;
+      page-break-inside:avoid !important;
+      break-inside:avoid !important;
+      overflow:hidden !important;
+      position:relative !important;
+    }
+    
+    /* منع أي عنصر من التسبب في صفحة جديدة */
+    .a4-page * {
+      page-break-after:avoid !important;
+      page-break-inside:avoid !important;
+      break-inside:avoid !important;
+    }
+    
     .witness-cell .img-handle.selected{border-color:transparent !important}
     .witness-cell.empty .inner-frame::before{display:none !important}
   }
@@ -1074,33 +1132,72 @@ function drawPDFCanvas(){
     var headerSrc = headerImg ? headerImg.src : null;
     var footerSrc = footerImg ? footerImg.src : null;
     
-    // صور الشواهد (نأخذها من imageData مباشرة)
+    // صور الشواهد - نستخدم offsetTop/offsetLeft (مستقلة عن transform)
+    // مهم: نعكس الإحداثيات من DOM (LTR في Canvas) لـ RTL إذا لزم الأمر
     var witnessImgs = [];
-    document.querySelectorAll('#page .witness-cell:not(.empty)').forEach(function(cell){
-      var idx = cell.dataset.cell;
-      var handle = cell.querySelector('.img-handle');
-      var img = cell.querySelector('img');
-      if(img && img.src && handle){
-        var inner = cell.querySelector('.inner-frame');
-        var cellRect = inner.getBoundingClientRect();
-        var pageRect = document.getElementById('page').getBoundingClientRect();
-        var hRect = handle.getBoundingClientRect();
-        
-        witnessImgs.push({
-          src: img.src,
-          // إحداثيات الخلية على الصفحة (بالنسبة لـ 794×1123)
-          cellX: (cellRect.left - pageRect.left) / pageScale,
-          cellY: (cellRect.top - pageRect.top) / pageScale,
-          cellW: cellRect.width / pageScale,
-          cellH: cellRect.height / pageScale,
-          // إحداثيات الصورة داخل الخلية
-          imgX: (hRect.left - cellRect.left) / pageScale,
-          imgY: (hRect.top - cellRect.top) / pageScale,
-          imgW: hRect.width / pageScale,
-          imgH: hRect.height / pageScale,
-        });
+    
+    // نستخدم getOffsetRelativeTo بدل getBoundingClientRect لتفادي تأثير الـ transform
+    function getOffsetTo(el, ancestor){
+      var x = 0, y = 0;
+      while(el && el !== ancestor){
+        x += el.offsetLeft;
+        y += el.offsetTop;
+        el = el.offsetParent;
       }
-    });
+      return {x: x, y: y};
+    }
+    
+    var pageEl = document.getElementById('page');
+    
+    // نأخذ خلايا القالب الحالي فقط (المرئية)
+    var visibleContent;
+    if(currentTemplate === 1){
+      visibleContent = document.querySelector('.t1-content');
+    } else {
+      visibleContent = document.querySelector('.t2-content');
+    }
+    
+    if(visibleContent){
+      visibleContent.querySelectorAll('.witness-cell:not(.empty)').forEach(function(cell){
+        var inner = cell.querySelector('.inner-frame');
+        var handle = cell.querySelector('.img-handle');
+        var img = cell.querySelector('img');
+        
+        if(img && img.src && handle && inner){
+          // إحداثيات الخلية بالنسبة للصفحة (offsetLeft/Top للإطار الداخلي)
+          var innerOffset = getOffsetTo(inner, pageEl);
+          var innerW = inner.offsetWidth;
+          var innerH = inner.offsetHeight;
+          
+          // إحداثيات الصورة داخل الخلية - نستخدم style.left/top مباشرة
+          // (لأن الـ handle يستخدم position:absolute مع left/top بالـ pixels)
+          var imgLeft = parseFloat(handle.style.left) || 0;
+          var imgTop = parseFloat(handle.style.top) || 0;
+          var imgW = parseFloat(handle.style.width) || innerW;
+          var imgH = parseFloat(handle.style.height) || innerH;
+          
+          // إذا الـ width/height كانت 100% (لم تُحرَّك)، نستخدم أبعاد الإطار
+          if(handle.style.width === '100%' || !handle.style.width){
+            imgW = innerW;
+          }
+          if(handle.style.height === '100%' || !handle.style.height){
+            imgH = innerH;
+          }
+          
+          witnessImgs.push({
+            src: img.src,
+            cellX: innerOffset.x,
+            cellY: innerOffset.y,
+            cellW: innerW,
+            cellH: innerH,
+            imgX: imgLeft,
+            imgY: imgTop,
+            imgW: imgW,
+            imgH: imgH
+          });
+        }
+      });
+    }
     
     // ==== تحميل كل الصور ثم الرسم ====
     var loadPromises = [
